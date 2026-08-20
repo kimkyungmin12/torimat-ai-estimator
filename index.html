@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>토리매트 AI 자동견적</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Arial,"Noto Sans KR",sans-serif;background:#f4f5f2;color:#222}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px}
+  h1{font-size:28px;margin:0 0 6px}
+  .sub{color:#666;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}
+  .card{background:#fff;border:1px solid #ddd;border-radius:14px;padding:18px}
+  .step{font-size:13px;font-weight:700;color:#35663e;margin-bottom:8px}
+  #pasteZone{min-height:150px;border:2px dashed #5b8661;border-radius:12px;display:flex;
+    align-items:center;justify-content:center;text-align:center;padding:20px;background:#f7fbf7;cursor:pointer;outline:none}
+  #pasteZone:focus{box-shadow:0 0 0 4px rgba(61,111,73,.12)}
+  #preview{display:none;max-width:100%;max-height:650px;margin:14px auto 0;border-radius:8px;border:1px solid #ddd}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  button{border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
+  .primary{background:#3c6e47;color:#fff}
+  .secondary{background:#fff;border:1px solid #3c6e47;color:#2f5b38}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .status{font-size:13px;color:#666;margin-top:10px;white-space:pre-wrap}
+  table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
+  th,td{padding:9px 7px;border-bottom:1px solid #eee;text-align:left}
+  input{width:100%;padding:8px;border:1px solid #ccc;border-radius:7px}
+  .result{margin-top:14px;padding:14px;background:#edf6ed;border:1px solid #cfe2cf;border-radius:10px}
+  .result strong{font-size:26px;color:#285331}
+  .small{font-size:12px;color:#777;line-height:1.5}
+  .warn{background:#fff7e8;border:1px solid #efd9a8;padding:10px;border-radius:9px;font-size:12px;color:#6f5a28;margin-top:12px}
+  @media(max-width:850px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>토리매트 AI 자동견적</h1>
+  <div class="sub">도면 → AI 치수 분석 → 확인/수정 → 회사 계산식으로 80×80 매트 장수 계산</div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="step">① 도면 넣기</div>
+      <input id="fileInput" type="file" accept="image/*" hidden>
+      <div id="pasteZone" tabindex="0" contenteditable="true">
+        <div><b>여기를 클릭한 뒤 Ctrl+V</b><br><span class="small">또는 클릭해서 이미지 파일 선택 · 드래그앤드롭 가능</span></div>
+      </div>
+      <img id="preview" alt="도면 미리보기">
+      <div class="row">
+        <button id="chooseBtn" class="secondary" type="button">파일 선택</button>
+        <button id="analyzeBtn" class="primary" type="button" disabled>② AI로 도면 분석</button>
+      </div>
+      <div id="status" class="status">도면을 넣어주세요.</div>
+      <div class="warn">AI가 읽은 치수는 반드시 한 번 확인하세요. 도면에 표시되지 않은 값은 임의 추정하지 않도록 설정했습니다.</div>
+    </div>
+
+    <div class="card">
+      <div class="step">③ 거실 · 복도 · 주방 치수 확인</div>
+      <table>
+        <thead><tr><th>구간</th><th>가로 cm</th><th>세로 cm</th><th>50cm 칸</th></tr></thead>
+        <tbody id="rooms"></tbody>
+      </table>
+      <div class="row">
+        <button id="addBtn" class="secondary" type="button">구간 추가</button>
+        <button id="calcBtn" class="primary" type="button">④ 80매트 계산</button>
+      </div>
+      <div id="result" class="result">
+        <div>예상 장수</div>
+        <strong>-</strong>
+        <div id="basis" class="small"></div>
+      </div>
+      <div id="aiNotes" class="small" style="margin-top:12px"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let currentFile = null;
+const defaultRooms = ["거실","복도","주방"];
+
+function addRoom(name="", w="", h="", confidence=""){
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input class="name" value="${name}"></td>
+    <td><input class="w" type="number" step="0.1" value="${w ?? ""}"></td>
+    <td><input class="h" type="number" step="0.1" value="${h ?? ""}"></td>
+    <td class="units">0</td>`;
+  $("#rooms").appendChild(tr);
+  for(const el of tr.querySelectorAll("input")) el.addEventListener("input", refreshRow);
+  if(confidence) tr.title = "AI confidence: " + confidence;
+  refreshRow.call(tr.querySelector(".w"));
+}
+defaultRooms.forEach(n=>addRoom(n));
+
+function refreshRow(){
+  const tr = this.closest ? this.closest("tr") : this;
+  const w = parseFloat(tr.querySelector(".w").value)||0;
+  const h = parseFloat(tr.querySelector(".h").value)||0;
+  tr.querySelector(".units").textContent = (w&&h) ? Math.ceil(w/50)*Math.ceil(h/50) : 0;
+}
+
+function showFile(file){
+  if(!file || !file.type.startsWith("image/")) return;
+  currentFile = file;
+  const url = URL.createObjectURL(file);
+  const img = $("#preview");
+  img.onload = ()=>URL.revokeObjectURL(url);
+  img.src = url;
+  img.style.display = "block";
+  $("#analyzeBtn").disabled = false;
+  $("#status").textContent = "도면 입력 완료 ✓  이제 AI로 도면 분석을 누르세요.";
+}
+
+$("#chooseBtn").onclick = ()=>$("#fileInput").click();
+$("#pasteZone").onclick = (e)=>{ if(e.target.id==="pasteZone" || e.target.parentElement?.id==="pasteZone") $("#fileInput").click(); };
+$("#fileInput").onchange = ()=>showFile($("#fileInput").files[0]);
+
+$("#pasteZone").addEventListener("paste", e=>{
+  const items = [...(e.clipboardData?.items||[])];
+  const item = items.find(i=>i.type.startsWith("image/"));
+  if(item){
+    e.preventDefault();
+    showFile(item.getAsFile());
+    $("#pasteZone").innerHTML="<div><b>도면 붙여넣기 완료 ✓</b><br><span class='small'>새 도면은 다시 Ctrl+V</span></div>";
+  }
+});
+["dragover","dragenter"].forEach(t=>$("#pasteZone").addEventListener(t,e=>e.preventDefault()));
+$("#pasteZone").addEventListener("drop",e=>{
+  e.preventDefault();
+  showFile(e.dataTransfer.files[0]);
+});
+
+function fileToDataURL(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader(); r.onload=()=>resolve(r.result); r.onerror=reject; r.readAsDataURL(file);
+  });
+}
+
+$("#analyzeBtn").onclick = async ()=>{
+  if(!currentFile) return;
+  $("#analyzeBtn").disabled=true;
+  $("#status").textContent="AI가 도면 숫자와 공간을 분석 중입니다...";
+  try{
+    const dataUrl = await fileToDataURL(currentFile);
+    const res = await fetch("/api/analyze",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({image:dataUrl})
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error||"분석 실패");
+
+    $("#rooms").innerHTML="";
+    const byName = new Map((data.rooms||[]).map(r=>[r.name,r]));
+    for(const name of defaultRooms){
+      const r=byName.get(name);
+      addRoom(name,r?.width_cm ?? "",r?.height_cm ?? "",r?.confidence ?? "");
+    }
+    for(const r of (data.rooms||[])){
+      if(!defaultRooms.includes(r.name)) addRoom(r.name,r.width_cm ?? "",r.height_cm ?? "",r.confidence ?? "");
+    }
+    $("#aiNotes").textContent = data.notes ? "AI 메모: "+data.notes : "";
+    $("#status").textContent="분석 완료 ✓  오른쪽 치수가 맞는지 확인하고 필요하면 수정하세요.";
+  }catch(err){
+    $("#status").textContent="분석 실패: "+err.message;
+  }finally{
+    $("#analyzeBtn").disabled=false;
+  }
+};
+
+$("#addBtn").onclick=()=>addRoom("기타");
+
+$("#calcBtn").onclick=()=>{
+  let total=0, valid=0;
+  for(const tr of $("#rooms").querySelectorAll("tr")){
+    const w=parseFloat(tr.querySelector(".w").value)||0;
+    const h=parseFloat(tr.querySelector(".h").value)||0;
+    const units=(w&&h)?Math.ceil(w/50)*Math.ceil(h/50):0;
+    tr.querySelector(".units").textContent=units;
+    if(units){ total+=units; valid++; }
+  }
+  if(!valid){
+    $("#result strong").textContent="-";
+    $("#basis").textContent="가로·세로 치수를 먼저 확인하세요.";
+    return;
+  }
+  const mats=Math.floor(total/2.56);
+  $("#result strong").textContent=mats+"장";
+  $("#basis").textContent=`회사 계산식: 구간별 ceil(가로÷50) × ceil(세로÷50) 합계 ${total}칸 → floor(${total}÷2.56) = ${mats}장`;
+};
+</script>
+</body>
+</html>
